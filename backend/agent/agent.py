@@ -5,7 +5,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 from pymongo import MongoClient
-from api.constants import PortfolioConstants
+from constants import PortfolioConstants
 from model import PortfolioData
 from pydantic import ValidationError
 
