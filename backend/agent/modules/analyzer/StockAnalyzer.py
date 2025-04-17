@@ -1,5 +1,5 @@
 import yfinance as yf
-from yahooquery import Ticker, Screener
+from yahooquery import Ticker
 import pandas as pd
 from utils.calculations import calculate_1y_return, calculate_sharpe_ratio, calculate_tracking_error
 from constants import CATEGORY_TO_ASSET_CLASS
@@ -18,7 +18,7 @@ def safe_ticker_request(symbol, retries=3, backoff=2):
     return None
 
 
-class StockAnalyzer_v2:
+class StockAnalyzer:
     def __init__(self, ticker: str):
         self.asset_name = ticker
         self.yq = safe_ticker_request(ticker)
@@ -44,11 +44,8 @@ class StockAnalyzer_v2:
 
     def get_price_data(self, ticker, period="5y"):
         try:
-            data = self.yq.history(period=period)
-            data = data.xs(ticker, level=0)  # Flatten MultiIndex to just dates
-            # <- ✅ Force date index to Timestamp
-            data.index = pd.to_datetime(data.index)
-            return data[['adjclose']]
+            data = yf.download(ticker, period=period)['Close']
+            return data
         except Exception as e:
             print(f"Error getting price data for {ticker}: {e}")
             return None
@@ -127,7 +124,11 @@ class StockAnalyzer_v2:
         etf_data['Expense_Ratio'] = expense_ratio
         etf_data['Turnover_Ratio'] = turnover_ratio
 
-        hist_df = self.get_price_data(self.asset_name, period="5y")
+        try:
+            hist_df = yf.Ticker(self.asset_name).history(period="5y")
+        except Exception as e:
+            print(f"Error getting price data for {self.asset_name}: {e}")
+            return etf_data
 
         if hist_df.empty:
             print(f"No price history for {self.asset_name}")
@@ -141,12 +142,10 @@ class StockAnalyzer_v2:
             })
             return etf_data
 
-        latest_date = hist_df.index.max()
-
         hist_1y = hist_df.loc[hist_df.index >= (
-            latest_date - pd.DateOffset(years=1))]
+            hist_df.index.max() - pd.DateOffset(years=1))]
         hist_3y = hist_df.loc[hist_df.index >= (
-            latest_date - pd.DateOffset(years=3))]
+            hist_df.index.max() - pd.DateOffset(years=3))]
 
         if hist_1y.empty or hist_3y.empty:
             etf_data.update({

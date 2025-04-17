@@ -1,12 +1,14 @@
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
-from modules.portfolio import process_etf, get_category_etf_metrics, filter_and_sort_etfs, compute_etf_count_by_allocation, select_etfs_by_overlap, print_final_portfolio_breakdown, retrieve_etfs
 from pydantic import BaseModel, Field, ValidationError
 from typing import Optional, Dict
 from copilotkit.langchain import copilotkit_emit_state
 from langchain_openai import ChatOpenAI
 from agent.constants import PortfolioConstants, CATEGORY_TO_ASSET_CLASS, BOND_CATEGORIES
 from langchain_core.messages import AIMessage, ToolMessage
+from utils.etf_utils import compute_etf_count_by_allocation
+from modules.analyzer.BatchStockAnalyzer import process_etf_batch, get_category_etf_metrics_batch, filter_and_sort_etfs, select_etfs_by_overlap
+from modules.portfolio import retrieve_etfs
 
 
 class PortfolioResponse(BaseModel):
@@ -149,7 +151,7 @@ async def classify_etfs_node(state, config: RunnableConfig):
         initial_allocation = state["portfolio"].get("initial_allocation", {})
         symbols = state["portfolio"].get("symbols", [])
 
-        top_10_etfs, bond_etfs = process_etf(initial_allocation, symbols)
+        top_10_etfs, bond_etfs = process_etf_batch(initial_allocation, symbols)
 
         state["portfolio"]["top_10_etfs"] = top_10_etfs
         state["portfolio"]["bond_etfs"] = bond_etfs
@@ -177,9 +179,12 @@ async def get_category_metrics_node(state, config: RunnableConfig):
 
     try:
         all_category_etfs = {
-            **state.get("top_10_etfs", {}), **state.get("bond_etfs", {})}
-        category_metrics = get_category_etf_metrics(all_category_etfs)
-        state['category_metrics'] = category_metrics
+            **state.get("portfolio", {}).get("top_10_etfs", {}), **state.get("portfolio", {}).get("bond_etfs", {})}
+        print("[DEBUG] All category ETFs:", all_category_etfs)
+        category_metrics = get_category_etf_metrics_batch(all_category_etfs)
+        print("[DEBUG] Returned category_metrics:", category_metrics)
+
+        state['portfolio']['category_metrics'] = category_metrics
         state["logs"][-1]["done"] = True
     except Exception as e:
         state["logs"][-1]["done"] = True
@@ -200,9 +205,12 @@ async def select_final_etfs_node(state, config: RunnableConfig):
     await copilotkit_emit_state(config, state)
 
     try:
-        category_dfs = filter_and_sort_etfs(state["category_metrics"])
+        category_dfs = filter_and_sort_etfs(
+            state["portfolio"]["category_metrics"])
+
         category_counts = compute_etf_count_by_allocation(
-            state['portfolio'].get('initial_allocation', {}),
+            state['portfolio'].get('initial_allocation',
+                                   {}).get('allocation', {}),
             total_etfs=10
         )
 
@@ -223,7 +231,7 @@ async def select_final_etfs_node(state, config: RunnableConfig):
     except Exception as e:
         state["logs"][-1]["done"] = True
         state['logs'].append(
-            {"message": f"❌ Failed to get ETF metrics: {str(e)}", "done": True})
+            {"message": f"❌ Failed select final etfs: {str(e)}", "done": True})
 
     await copilotkit_emit_state(config, state)
     return state
@@ -253,4 +261,24 @@ async def build_portfolio_message_node(state, config: RunnableConfig):
         AIMessage(content=message)
     )
 
+    return state
+
+
+async def save_portfolio_node(state, config: RunnableConfig):
+    print("[STEP] Saving portfolio")
+    state["portfolio"] = state.get("portfolio", {})
+    state["logs"] = state.get("logs", [])
+    state["logs"].append({
+        "message": "Saving portfolio...",
+        "done": False
+    })
+
+    print("Save portfolio in db liao..")
+    state["logs"][-1]["done"] = True
+
+    state['messages'].append(
+        AIMessage(content="Portfolio has been saved successfully.")
+    )
+
+    await copilotkit_emit_state(config, state)
     return state

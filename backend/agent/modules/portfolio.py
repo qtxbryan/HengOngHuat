@@ -9,9 +9,8 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import ValidationError, BaseModel, Field
 from langchain_openai import ChatOpenAI
 from pymongo import MongoClient
-
-import time
-import random
+from collections import defaultdict
+from yahooquery import Ticker
 
 
 class MatchedPortfolio(TypedDict):
@@ -161,65 +160,34 @@ def process_etf(portfolio: MatchedPortfolio, symbols: List[str]) -> Dict[str, Li
         Dict[str, List[str]]: Top 10 ETFs and bond ETFs for each matched portfolio category
     """
 
-    etf_categories = {}
+    yq = Ticker(symbols)
+    key_stats = yq.key_stats
 
-    for symbol in symbols:
-        analyzer = StockAnalyzerFactory.get_analyzer(symbol)
-        category = analyzer.key_stats.get('category', 'Others')
-        etf_categories[symbol] = category
+    etf_categories = {
+        symbol: key_stats.get(symbol).get("category", "others")
+        for symbol in symbols
+    }
+
+    for symbol, category in etf_categories.items():
         print(f"[fetch_category] {symbol}: Category {category}")
 
     mapped_etfs = classify_etfs(etf_categories)
 
-    # Create filtered list with keys as categories of matched portfolio and value as empty list
-    filtered_etfs = {
-        category: []
-        for category in portfolio['allocation'].keys()
-    }
-
-    # Append to filtered_etfs
+    filtered_etfs = defaultdict(list)
     for symbol, category in mapped_etfs.items():
-        if category in filtered_etfs:
+        if category in portfolio["allocation"]:
             filtered_etfs[category].append(symbol)
 
-    # Get the top 10 Etfs for each category
-    top_10_etfs = {category: etfs[:10] for category, etfs in filtered_etfs.items(
-    ) if category not in BOND_CATEGORIES}
+    # Slice top 10 for equity and bond ETFs
+    top_10_etfs = {
+        cat: etfs[:10] for cat, etfs in filtered_etfs.items() if cat not in BOND_CATEGORIES
+    }
 
-    # Filter bond ETFs based on matched portfolio allocation
-    bond_etfs = {category: etfs[:10] for category, etfs in filtered_etfs.items(
-    ) if category in BOND_CATEGORIES}
+    bond_etfs = {
+        cat: etfs[:10] for cat, etfs in filtered_etfs.items() if cat in BOND_CATEGORIES
+    }
 
     return top_10_etfs, bond_etfs
-
-# def process_etf(portfolio: Dict, symbols: List[str]):
-#     etf_categories = {}
-
-#     for symbol in symbols:
-#         try:
-#             analyzer = StockAnalyzerFactory.get_analyzer(symbol)
-#             etf_categories[symbol] = analyzer.asset_info.get(
-#                 "category", "Others")
-#         except Exception as e:
-#             print(f"[WARN] {symbol} failed: {e}")
-#             etf_categories[symbol] = "Others"
-
-#         # add random sleep to avoid triggering anti-bot protection
-#         time.sleep(random.uniform(1.0, 2.0))
-
-#     mapped_etfs = classify_etfs(etf_categories)
-#     filtered_etfs = {category: []
-#                      for category in portfolio['allocation'].keys()}
-#     for symbol, category in mapped_etfs.items():
-#         if category in filtered_etfs:
-#             filtered_etfs[category].append(symbol)
-
-#     top_10_etfs = {cat: etfs[:10] for cat, etfs in filtered_etfs.items(
-#     ) if cat not in BOND_CATEGORIES}
-#     bond_etfs = {cat: etfs[:10] for cat,
-#                  etfs in filtered_etfs.items() if cat in BOND_CATEGORIES}
-
-#     return top_10_etfs, bond_etfs
 
 
 def filter_etfs_dataframe(etf_df, bond_df):
@@ -275,32 +243,31 @@ def overlap_check(selected_etfs, holdings_data):
 
 
 def get_category_etf_metrics(all_category_etfs: Dict[str, List[str]]) -> Dict[str, List[dict]]:
-    """Get ETF metrics grouped by category."""
-    category_metrics: Dict[str, List[dict]] = {}
+    all_tickers = list({ticker for tickers in all_category_etfs.values()
+                        for ticker in tickers})
 
-    def fetch(ticker):
-        return ticker, StockAnalyzerFactory.get_analyzer(ticker).get_etf_metrics()
+    print(f"[BATCH] Fetching ETF metrics for {all_tickers} tickers")
 
-    # Flatten all tickers to fetch in parallel
-    all_tickers = list(
-        {ticker for tickers in all_category_etfs.values() for ticker in tickers})
+    etf_metrics = {}
+    for ticker in all_tickers:
+        try:
+            analyzer = StockAnalyzerFactory.get_analyzer(ticker)
+            metrics = analyzer.get_etf_metrics()
+            if metrics:
+                etf_metrics[ticker] = metrics
+                print(f"[fetch_metrics] {ticker}: Success")
+            else:
+                print(f"[fetch_metrics] {ticker}: No data")
+        except Exception as e:
+            print(f"[ERROR] {ticker} failed: {e}")
 
-    results = {}
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {executor.submit(fetch, t): t for t in all_tickers}
-        for future in as_completed(futures):
-            try:
-                ticker, metrics = future.result()
-                if metrics:
-                    results[ticker] = metrics
-            except Exception as e:
-                print(f"[ERROR] Fetching metrics failed: {e}")
-
+    category_metrics: Dict[str, List[dict]] = defaultdict(list)
     for category, tickers in all_category_etfs.items():
-        category_metrics[category] = [results[t]
-                                      for t in tickers if t in results]
-    return category_metrics
+        for ticker in tickers:
+            if ticker in etf_metrics:
+                category_metrics[category].append(etf_metrics[ticker])
+
+    return dict(category_metrics)
 
 
 def filter_and_sort_etfs(category_metrics: Dict[str, List[dict]]) -> Dict[str, pd.DataFrame]:
@@ -399,43 +366,3 @@ def print_final_portfolio_breakdown(etfs: List[str]):
         cat = StockAnalyzerFactory.get_analyzer(
             etf).asset_info.get("category", "Unknown")
         print(f"{etf} → {cat}")
-
-
-def portfolio_construction(preconstruct_portfolio: dict):
-    """
-    Construct the portfolio based on the after predefined portfolio matched by LLM
-
-    Returns:
-        List[str]: List of ETFs
-    """
-    symbols = retrieve_etfs()
-
-    top_10_etfs, bond_etfs = process_etf(preconstruct_portfolio, symbols)
-
-    all_category_etfs = {**top_10_etfs, **bond_etfs}
-
-    # Step 1: Get ETF metrics
-    category_metrics = get_category_etf_metrics(all_category_etfs)
-
-    # Step 2: Filter and sort ETFs
-    category_dfs = filter_and_sort_etfs(category_metrics)
-
-    # Step 3: Compute ETF counts per category
-    category_counts = compute_etf_count_by_allocation(
-        preconstruct_portfolio["allocation"],
-        total_etfs=10
-    )
-
-    # Step 4: Select ETFs per category (respecting overlap filtering)
-    final_selected_etfs = []
-
-    for category, df in category_dfs.items():
-        desired_count = category_counts.get(category, 1)
-        if df.empty:
-            print(f"Warning: No valid ETFs found for category {category}")
-            continue
-        selected = select_etfs_by_overlap(category, df, desired_count)
-        final_selected_etfs.extend(selected)
-    print_final_portfolio_breakdown(final_selected_etfs)
-
-    return final_selected_etfs

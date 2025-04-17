@@ -8,6 +8,7 @@ class Portfolio(TypedDict):
     top_10_etfs: Dict[str, Any]
     bond_etfs: Dict[str, Any]
     holdings: List[str]
+    category_metrics: Dict[str, List[dict]]
 
 
 class AgentState(CopilotKitState):
@@ -17,3 +18,4 @@ class AgentState(CopilotKitState):
     portfolio: Optional[Portfolio]
     tool: str
     logs: List[dict]
+    approval_status: Optional[str] = None
